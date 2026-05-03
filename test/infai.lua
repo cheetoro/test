@@ -433,7 +433,9 @@ end
 --- Check if first run
 function TourManager:isFirstRun()
     local ns = getNamespace()
-    return not ns.hasCompletedTour and CONFIG.EnableTour
+    -- CONFIG may not be defined yet at this point (defined below), guard against nil
+    local enableTour = CONFIG and CONFIG.EnableTour
+    return not ns.hasCompletedTour and (enableTour ~= false)
 end
 
 --- Start tour
@@ -537,8 +539,9 @@ type ConfigType = {
 local CONFIG: ConfigType = {
     -- API Settings
     ApiKey = "Null",
-    Endpoint = "https://infiniteyieldai.ahazihak03.workers.dev/v1/chat/completions",
-    Model = "deepseek",
+    Endpoint = "https://text.pollinations.ai/openai",
+    EndpointFallback = "https://infiniteyieldai.ahazihak03.workers.dev/v1/chat/completions",
+    Model = "openai",
     MaxRetries = 2,
     RequestTimeout = 10, -- Seconds to wait for API response
     
@@ -4312,6 +4315,22 @@ If asked about the game: Use the provided game name to sound contextual.
             end
         end
 
+        -- Fallback: if primary endpoint returned a server error (503/502/500), retry with fallback URL
+        if CONFIG.EndpointFallback and finalResponse and (finalResponse.StatusCode == 503 or finalResponse.StatusCode == 502 or finalResponse.StatusCode == 500) then
+            warn("SIY: Primary endpoint returned " .. finalResponse.StatusCode .. ", trying fallback...")
+            local fallbackOptions = {
+                Url = CONFIG.EndpointFallback,
+                Method = requestOptions.Method,
+                Headers = requestOptions.Headers,
+                Body = requestOptions.Body
+            }
+            if requestOptions.Timeout then fallbackOptions.Timeout = requestOptions.Timeout end
+            local fbSuccess, fbResponse = pcall(httpRequest, fallbackOptions)
+            if fbSuccess and fbResponse and fbResponse.StatusCode == 200 then
+                finalResponse = fbResponse
+            end
+        end
+
         if finalResponse and finalResponse.StatusCode == 200 then
             local decodeSuccess, data = pcall(HttpService.JSONDecode, HttpService, finalResponse.Body)
             if not decodeSuccess or not data then
@@ -4787,9 +4806,11 @@ ConnectPersistent(Players.PlayerRemoving, function(player)
     end
 end)
 
--- Handle game closing
-game:BindToClose(function()
-    cleanup()
+-- Handle game closing (BindToClose is server-only; guard for client context)
+pcall(function()
+    game:BindToClose(function()
+        cleanup()
+    end)
 end)
 
 -- Expose cleanup for external use (e.g., script reload)
